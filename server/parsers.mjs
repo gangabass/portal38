@@ -93,3 +93,8 @@ export function normalizeAddress(value) {
   const aliases={'корп':'корпус','к':'корпус','пр':'проспект','пркт':'проспект','пер':'переулок','стр':'строение'};
   return String(value||'').toLocaleLowerCase('ru').replace(/ё/g,'е').replace(/пр-кт/g,'проспект').split(/[^\p{L}\p{N}]+/u).filter(t=>t&&!['г','город','ул','улица','д','дом'].includes(t)).map(t=>aliases[t]||t).join(' ');
 }
+
+export function bookingNotice(html){
+  try{const info=JSON.parse(html);return text(info.error_msg||info.error||info.msg||info.message||'').slice(0,1200);}catch{}
+  const $=load(html);return [...new Set($('.contextAlert,.alert,.alert-danger,.error-message,.error_msg,.popup.message,.popup.infoWindow').map((i,e)=>text($(e).text())).get().filter(Boolean))].join(' | ').slice(0,1200);
+}

@@ -1,5 +1,5 @@
 import {Portal,ROOT} from './portal.mjs';
-import {parsePeople,parseSpecialties,parseDoctors,parseSlots,parseAppointments} from './parsers.mjs';
+import {parsePeople,parseSpecialties,parseDoctors,parseSlots,parseAppointments,bookingNotice} from './parsers.mjs';
 import {conflicts,selectSlots} from './domain.mjs';
 import {load} from 'cheerio';
 import {BookingError,matchesBookedSlot} from './booking-state.mjs';
@@ -47,7 +47,7 @@ export class PortalAccount extends Portal {
       if(conflicts(rule,await this.appointments(rule.personId)).length)throw new BookingError('existing_appointment','not_sent','appointments','Уже есть активная запись. Две записи невозможны.');
       const current=selectSlots(rule,await this.slots({...rule,doctorIds:[slot.doctorId]})).find(s=>s.id===slot.id);
       if(!current)throw new BookingError('slot_unavailable','not_sent','availability','Талон уже недоступен.');
-      const info=JSON.parse(await this.request('/service/record/getRegAgreeRecordData',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:new URLSearchParams({MedStaffFact_id:slot.doctorId,Person_id:rule.personId,TimetableGraf_id:slot.id})}));
+      const info=JSON.parse(await this.request('/service/record/getRegAgreeRecordData',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest',Referer:ROOT+`/service/record/${rule.personId}/${slot.doctorId}/timetable`},body:new URLSearchParams({MedStaffFact_id:slot.doctorId,Person_id:rule.personId,TimetableGraf_id:slot.id})}));
       if(info.error_msg||info.error_code)throw new BookingError('portal_preflight_rejected','not_sent','parameters','Портал не разрешил записаться на выбранный талон. Запрос записи не отправлялся.');
       if(String(info.Person_id)!==rule.personId||String(info.MedStaffFact_id)!==slot.doctorId||String(info.TimetableGraf_id)!==slot.id||String(info.TimeTableType_id)!=='1')throw new BookingError('parameters_changed','not_sent','parameters','Параметры талона изменились. Запрос записи не отправлялся.');
       return current;
@@ -56,8 +56,10 @@ export class PortalAccount extends Portal {
   async book(rule,slot,{beforeSubmit=async()=>{},confirmationDelayMs=1000}={}){
     const current=await this.prepareBooking(rule,slot);
     await beforeSubmit(current);
+    let notice='';
     try{
-      await this.request(`/service/record/${rule.personId}/${slot.id}/record?email_notify=1&notify_time=24&doctor_id=${slot.doctorId}`);
+      const response=await this.request(`/service/record/${rule.personId}/${slot.id}/record?email_notify=1&notify_time=24&doctor_id=${slot.doctorId}`,{headers:{Referer:ROOT+`/service/record/${rule.personId}/${slot.doctorId}/timetable`,'Cache-Control':'no-cache'}});
+      notice=bookingNotice(response);
     }catch(error){throw new BookingError('submit_failed','unknown','submit','Не удалось выяснить результат запроса записи.',error);}
     try{
       for(let attempt=0;attempt<3;attempt++){
@@ -66,7 +68,7 @@ export class PortalAccount extends Portal {
         const appointment=records.find(a=>matchesBookedSlot(a,current));
         if(appointment)return {confirmed:true,appointment:{...current,status:'active',portalAppointmentId:appointment.id}};
       }
-      throw new BookingError('confirmation_missing','unknown','confirm','Запрос выполнен, но запись не найдена в картотеке.');
+      const error=new BookingError('confirmation_missing','unknown','confirm','Запрос выполнен, но запись не найдена в картотеке.');error.portalNotice=notice;throw error;
     }catch(error){if(error instanceof BookingError)throw error;throw new BookingError('confirmation_failed','unknown','confirm','Не удалось проверить картотеку после запроса записи.',error);}
   }
 }

@@ -45,3 +45,8 @@ test('booking confirmation requires exact person, doctor and date',()=>{
  for(const change of [{doctorId:'8'},{personId:'2'},{startsAt:null},{startsAt:'2030-11-21T10:30:00+08:00'}])assert.equal(matchesBookedSlot({...appointment,...change},slot),false);
  const error=new BookingError('preflight_failed','not_sent','prepare','',Object.assign(Error('HTTP'),{status:503}));assert.equal(bookingFailure(rule,error).lastBookingAttempt.httpStatus,503);
 });
+import {bookingNotice} from '../server/parsers.mjs';
+test('portal booking notices exclude form values and scripts',()=>{
+ assert.equal(bookingNotice('<div class="contextAlert">Запись недоступна</div><input name="csrf" value="private-token"><script>secret()</script>'),'Запись недоступна');
+ assert.equal(bookingNotice('{"error_msg":"Нет прикрепления"}'),'Нет прикрепления');
+});
