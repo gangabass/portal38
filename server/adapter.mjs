@@ -18,6 +18,23 @@ export class PortalAccount extends Portal {
     return parseDoctors(await this.request(`/service/record/${personId}/0/${specialtyId}/doctors?per_page=999999&type=by_lpu&show_other_mo=1`));
   }
   async appointments(personId){const specialties=await this.specialties(personId);return parseAppointments(await this.cards(),personId,specialties);}
+  async cancelAppointment(personId,appointmentId){
+    await this.assertPerson(personId);
+    const html=await this.cards(),records=parseAppointments(html,personId);
+    const appointment=records.find(a=>a.id===appointmentId);
+    if(!appointment)throw Error('Запись больше не найдена среди активных записей этого человека. Обновите список.');
+    if(!appointment.canCancel)throw Error('Портал не разрешает отменить эту запись онлайн.');
+    const csrf=load(html)('meta[name="csrf-token"]').attr('content');
+    if(!csrf)throw Error('Не удалось получить подтверждение сессии портала. Обновите список записей.');
+    const endpoint=appointment.cancelKind==='medservice'?'cancelRecordMedservice':'cancelRecord';
+    const body=new URLSearchParams({csrf});
+    if(appointment.cancelKind==='record')body.set('source_system',appointment.sourceSystem);
+    const response=JSON.parse(await this.request('/service/record/'+endpoint+'/'+appointment.portalRecordId,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body}));
+    if(response?.success===false||response?.error||response?.error_msg)throw Error('Портал отклонил отмену записи. Обновите список и проверьте её состояние.');
+    const remaining=await this.appointments(personId);
+    if(remaining.some(a=>a.id===appointmentId||(a.portalRecordId===appointment.portalRecordId&&a.sourceSystem===appointment.sourceSystem)||(a.doctorId&&a.doctorId===appointment.doctorId&&a.startsAt&&a.startsAt===appointment.startsAt)))throw Error('Отмена не подтверждена: запись пока остаётся активной на портале. Обновите список.');
+    return {appointment,appointments:remaining};
+  }
   async slots(rule){
     const doctors=(await this.doctors(rule.personId,rule.specialtyId)).filter(d=>d.clinic.id===rule.clinicId&&(!rule.doctorIds.length||rule.doctorIds.includes(d.id)));
     const slots=[];

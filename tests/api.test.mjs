@@ -8,6 +8,9 @@ test('API authorization, CORS, safe restart and account deletion',async()=>{
   const base=`http://127.0.0.1:${port}/api/`,headers={Authorization:`Bearer ${key}`};
   assert.equal((await fetch(base+'health')).status,200);
   assert.equal((await fetch(base+'accounts')).status,401);
+  const cancelPath=base+'accounts/test-account/appointments/'+'a'.repeat(64)+'/cancel';
+  assert.equal((await fetch(cancelPath,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
+  assert.equal((await fetch(cancelPath,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({personId:'1',confirm:false})})).status,400);
   assert.equal((await fetch(base+'accounts',{headers:{...headers,Origin:'https://evil.example'}})).status,403);
   const options=await fetch(base+'rules',{method:'OPTIONS',headers:{Origin:'https://family.example'}});assert.equal(options.status,204);assert.equal(options.headers.get('access-control-allow-origin'),'https://family.example');
   const accounts=await (await fetch(base+'accounts',{headers})).json();assert.deepEqual(accounts,[{id:'test-account',label:'Тест'}]);

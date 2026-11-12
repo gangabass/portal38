@@ -3,6 +3,8 @@ import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import webpush from 'web-push';
 import {Store} from './store.mjs';
 import {PortalAccount} from './adapter.mjs';
+import {publicAppointment} from './parsers.mjs';
+import {rulesToPause,isBookedAppointment} from './cancellation.mjs';
 import {validateRule,conflicts,runRule,selectSlots} from './domain.mjs';
 const env=process.env,store=new Store(env.DATA_DIR||'./data',env.ENCRYPTION_KEY);
 if(!env.FAMILY_ACCESS_KEY||env.FAMILY_ACCESS_KEY.length<24)throw Error('Configure FAMILY_ACCESS_KEY (at least 24 characters)');
@@ -72,8 +74,25 @@ const server=http.createServer(async(req,res)=>{
       const personId=url.searchParams.get('personId'),specialtyId=url.searchParams.get('specialtyId');
       if(m[2]!=='people'&&!/^\d+$/.test(personId||''))throw Error('Выберите человека');
       if(m[2]==='doctors'&&!/^\d+$/.test(specialtyId||''))throw Error('Выберите специальность');
-      return send(200,await portal[m[2]](...(m[2]==='people'?[]:[personId,...(m[2]==='doctors'?[specialtyId]:[])])));
+      const data=await portal[m[2]](...(m[2]==='people'?[]:[personId,...(m[2]==='doctors'?[specialtyId]:[])]));
+      return send(200,m[2]==='appointments'?data.map(publicAppointment):data);
     });
+    if((m=path.match(/^\/api\/accounts\/([\w-]+)\/appointments\/([a-f0-9]{64})\/cancel$/))&&req.method==='POST'){
+      const b=await body(req);if(!/^\d+$/.test(b.personId||'')||b.confirm!==true)throw Error('Выберите человека и подтвердите отмену записи.');
+      const accountId=m[1],appointmentId=m[2];
+      return await withAccount(accountId,async portal=>{
+        const current=await portal.appointments(b.personId),appointment=current.find(a=>a.id===appointmentId);
+        if(!appointment)return send(409,{error:'Запись уже отсутствует в активных записях. Обновите список.'});
+        if(!appointment.canCancel)return send(409,{error:'Отмена этой записи недоступна на портале.'});
+        const paused=rulesToPause(store.list('rules'),accountId,appointment);
+        for(const rule of paused){store.put('rules',rule.id,rule);store.delete('outbox','rule-'+rule.id);}
+        try{
+          const result=await portal.cancelAppointment(b.personId,appointmentId);
+          for(const rule of store.list('rules'))if(isBookedAppointment(rule,accountId,appointment))store.put('rules',rule.id,{...rule,status:'cancelled',appointment:{...rule.appointment,status:'cancelled'},message:'Запись отменена на портале.'});
+          return send(200,{ok:true,appointments:result.appointments.map(publicAppointment),pausedRules:paused.length});
+        }catch{return send(409,{error:'Не удалось подтвердить отмену. Обновите список записей перед новой попыткой. Связанные отслеживания поставлены на паузу.'});}
+      });
+    }
     if(path==='/api/rules'&&req.method==='GET')return send(200,store.list('rules'));
     if(path==='/api/rules'&&req.method==='POST'){
       const b=await body(req);validateRule(b);if(unresolved(b))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
