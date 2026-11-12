@@ -1,0 +1,26 @@
+services:
+  portal38-api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+    volumes:
+      - portal38-data:/data
+    networks:
+      - dnevnik-proxy
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  portal38-data:
+networks:
+  dnevnik-proxy:
+    external: true

@@ -1,0 +1,2 @@
+import {PortalAccount} from './adapter.mjs';import {load} from 'cheerio';
+const p=new PortalAccount({login:process.env.PORTAL_TEST_LOGIN,password:process.env.PORTAL_TEST_PASSWORD});const people=await p.people(),specialties=await p.specialties(people[0].id),ds=await p.doctors(people[0].id,specialties[0].id);const $=load(await p.request(ds[0].url));console.log(JSON.stringify({free:$('td.free').map((i,e)=>({type:$(e).attr('data-timetabletype_id'),title:$(e).attr('title')})).get(),legend:$('[class*=legend]').text().trim()}));
