@@ -8,7 +8,7 @@ export class Portal {
       const r=await fetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(25000),headers:{'User-Agent':'Mozilla/5.0','Cookie':Object.entries(this.cookies).map(([k,v])=>`${k}=${v}`).join('; '),...options.headers}});
       for(const cookie of r.headers.getSetCookie()) {const pair=cookie.split(';')[0],pos=pair.indexOf('=');this.cookies[pair.slice(0,pos)]=pair.slice(pos+1);}
       if([301,302,303,307,308].includes(r.status)) {url=new URL(r.headers.get('location'),url);if(url.origin!==ROOT)throw Error('Портал перенаправил на другой сайт');if([301,302,303].includes(r.status))options={};continue;}
-      if(!r.ok) throw Error(`Портал ответил HTTP ${r.status}`);
+      if(!r.ok){const error=Error(`Портал ответил HTTP ${r.status}`);error.status=r.status;throw error;}
       return r.text();
     }
     throw Error('Слишком много перенаправлений портала');

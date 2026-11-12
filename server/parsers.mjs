@@ -5,7 +5,13 @@ export function portalDate(s) {
   let m=String(s||'').match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
   if(m)return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]||'00'}+08:00`;
   m=String(s||'').match(/(\d{2})\.(\d{2})\.(\d{4}).*?(\d{2}):(\d{2})/);
-  return m?`${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:00+08:00`:null;
+  if(m)return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:00+08:00`;
+  const months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+  m=String(s||'').toLocaleLowerCase('ru').match(/(\d{1,2})\s+([а-яё]+)\s+(\d{4}).*?(\d{1,2}):(\d{2})/);
+  const month=m?months.indexOf(m[2])+1:0;
+  if(!month)return null;
+  const result=`${m[3]}-${String(month).padStart(2,'0')}-${m[1].padStart(2,'0')}T${m[4].padStart(2,'0')}:${m[5]}:00+08:00`;
+  return Number.isFinite(Date.parse(result))?result:null;
 }
 export function parsePeople(html) {
   const $=load(html),people=[];

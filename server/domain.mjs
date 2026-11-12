@@ -1,3 +1,4 @@
+import {BookingError,bookingFailure} from './booking-state.mjs';
 export const ZONE = 'Asia/Irkutsk';
 export function localDate(value) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone:ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(value)).map(p=>[p.type,p.value]));
@@ -32,12 +33,16 @@ export async function runRule(rule, {portal,save,notify,previousIds=[],now=Date.
   }
   const slots=selectSlots(rule,await portal.slots(rule),now);
   if (rule.autoBook && slots.length) {
-    // Persist before the remote mutation. An uncertain result must never be retried automatically.
-    await save({...rule,status:'booking',slots,checkedAt:new Date(now).toISOString(),message:'Проверяем результат записи…'});
-    const result=await portal.book(rule,slots[0]);
-    if (!result.confirmed) throw Error('Результат записи не подтверждён. Проверьте записи на портале.');
-    await save({...rule,status:'booked',slots:[],appointment:result.appointment,message:'Запись подтверждена',checkedAt:new Date(now).toISOString()});
-    await notify({title:'Вы записаны к врачу',body:slots[0].doctorName,tag:`booked-${rule.id}`}); return;
+    let submitted=false,result;
+    try{
+      result=await portal.book(rule,slots[0],{beforeSubmit:async slot=>{
+        await save({...rule,status:'booking',slots,checkedAt:new Date(now).toISOString(),message:'Проверяем результат записи…',lastBookingAttempt:{stage:'submit',outcome:'pending',slotId:slot.id,doctorId:slot.doctorId,startsAt:slot.startsAt,at:new Date().toISOString()}});
+        submitted=true;
+      }});
+      if(!result.confirmed)throw new BookingError('confirmation_missing','unknown','confirm','Результат записи не подтверждён.');
+    }catch(error){await save(bookingFailure({...rule,slots,lastBookingAttempt:{slotId:slots[0].id,doctorId:slots[0].doctorId,startsAt:slots[0].startsAt}},error,{submitted,now}));return;}
+    await save({...rule,status:'booked',slots:[],appointment:result.appointment,message:'Запись подтверждена',checkedAt:new Date().toISOString(),lastBookingAttempt:{stage:'confirm',outcome:'confirmed',at:new Date().toISOString()}});
+    await notify({title:'Вы записаны к врачу',body:slots[0].doctorName,tag:`booked-${rule.id}`});return;
   }
   await save({...rule,status:'active',slots,checkedAt:new Date(now).toISOString(),message:slots.length?`Подходящих талонов: ${slots.length}`:'Подходящих талонов пока нет'});
   const fresh=slots.filter(s=>!previousIds.includes(s.id));

@@ -33,11 +33,11 @@ test('manual rule displays every slot and only notifies new ones',async()=>{
  assert.equal(saved[0].slots.length,2);assert.equal(notifications.length,1);assert.match(notifications[0].body,/1/);
 });
 test('booking state is persisted before mutation, success stops rule',async()=>{
- const saved=[],booked=[];await runRule({...rule,autoBook:true},{now,portal:{appointments:async()=>[],slots:async()=>[slot,{...slot,id:'later',startsAt:'2030-01-03T10:00:00+08:00'}],book:async(r,s)=>{assert.equal(saved.at(-1).status,'booking');booked.push(s.id);return {confirmed:true,appointment:s};}},save:r=>saved.push(r),notify:()=>{}});
+ const saved=[],booked=[];await runRule({...rule,autoBook:true},{now,portal:{appointments:async()=>[],slots:async()=>[slot,{...slot,id:'later',startsAt:'2030-01-03T10:00:00+08:00'}],book:async(r,s,{beforeSubmit})=>{await beforeSubmit(s);assert.equal(saved.at(-1).status,'booking');booked.push(s.id);return {confirmed:true,appointment:s};}},save:r=>saved.push(r),notify:()=>{}});
  assert.deepEqual(booked,['t1']);assert.equal(saved.at(-1).status,'booked');
 });
-test('ambiguous booking result leaves durable booking marker',async()=>{
- let saved;await assert.rejects(runRule({...rule,autoBook:true},{now,portal:{appointments:async()=>[],slots:async()=>[slot],book:async()=>({confirmed:false})},save:r=>saved=r,notify:()=>{}}));assert.equal(saved.status,'booking');
+test('ambiguous booking result stops automatic retries',async()=>{
+ let saved;await runRule({...rule,autoBook:true},{now,portal:{appointments:async()=>[],slots:async()=>[slot],book:async()=>({confirmed:false})},save:r=>saved=r,notify:()=>assert.fail()});assert.equal(saved.status,'needs_review');
 });
 test('encrypted database persists without plaintext and authenticates metadata',()=>{
  const dir=mkdtempSync(join(tmpdir(),'portal38-'));try{const store=new Store(dir,'ab'.repeat(32));store.put('accounts','a1',{password:'a-unique-secret',person:'private-name'});assert.equal(store.get('accounts','a1').password,'a-unique-secret');assert.equal(readFileSync(join(dir,'portal38.db-wal')).includes(Buffer.from('a-unique-secret')),false);const row=store.db.prepare('SELECT value FROM objects').get();assert.throws(()=>store.decode('accounts','different',row.value));store.db.close();const reopened=new Store(dir,'ab'.repeat(32));assert.equal(reopened.get('accounts','a1').person,'private-name');reopened.db.close();}finally{rmSync(dir,{recursive:true,force:true});}

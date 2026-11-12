@@ -3,6 +3,7 @@ import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import webpush from 'web-push';
 import {Store} from './store.mjs';
 import {PortalAccount} from './adapter.mjs';
+import {BookingError,bookingFailure,matchesBookedSlot} from './booking-state.mjs';
 import {publicAppointment} from './parsers.mjs';
 import {rulesToPause,isBookedAppointment} from './cancellation.mjs';
 import {validateRule,conflicts,runRule,selectSlots} from './domain.mjs';
@@ -39,7 +40,7 @@ async function tick(){if(ticking)return;ticking=true;
       const fresh=store.get('rules',rule.id);if(!fresh||!['active','error'].includes(fresh.status))return;
       if(unresolved(fresh)){store.put('rules',fresh.id,{...fresh,status:'blocked',slots:[],message:'Другая попытка записи не подтверждена. Проверьте картотеку на портале.'});return;}
       try{await runRule(fresh,{portal,previousIds:(fresh.slots||[]).map(s=>s.id),save:r=>store.put('rules',r.id,r),notify});}
-      catch{const current=store.get('rules',rule.id);if(current)store.put('rules',rule.id,{...current,status:current.status==='booking'?'needs_review':'error',message:current.status==='booking'?'Проверьте картотеку на портале: результат записи не подтверждён.':'Не удалось проверить портал. Повторим через минуту.',checkedAt:new Date().toISOString()});}
+      catch{const current=store.get('rules',rule.id);if(current&&['active','error','booking'].includes(current.status))store.put('rules',rule.id,{...current,status:current.status==='booking'?'needs_review':'error',message:current.status==='booking'?'Проверьте картотеку на портале: результат записи не подтверждён.':'Не удалось проверить портал. Повторим через минуту.',checkedAt:new Date().toISOString()});}
     }).catch(()=>{});
   }await sendPush();}finally{ticking=false;}}
 for(const r of store.list('rules'))if(r.status==='booking')store.put('rules',r.id,{...r,status:'needs_review',message:'Сервер перезапущен во время записи. Проверьте картотеку на портале.'});
@@ -107,7 +108,7 @@ const server=http.createServer(async(req,res)=>{
         store.put('rules',r.id,r);send(201,r);
       });
     }
-    if((m=path.match(/^\/api\/rules\/([\w-]+)(?:\/(book))?$/))){
+    if((m=path.match(/^\/api\/rules\/([\w-]+)(?:\/(book|recheck))?$/))){
       const r=store.get('rules',m[1]);if(!r)return send(404,{error:'Правило не найдено'});
       return await withAccount(r.accountId,async portal=>{
         const latest=store.get('rules',r.id);if(!latest)return send(404,{error:'Правило удалено'});
@@ -117,13 +118,28 @@ const server=http.createServer(async(req,res)=>{
           if(['booked','booking','needs_review'].includes(latest.status))throw Error('Сначала проверьте результат на портале. Для новой попытки создайте новое правило.');
           store.put('rules',r.id,{...latest,status:b.status,message:'',slots:[]});return send(200,{ok:true});
         }
+        if(m[2]==='recheck'&&req.method==='POST'){
+          if(!['needs_review','blocked'].includes(latest.status))throw Error('Правило не требует проверки результата.');
+          const b=await body(req),appointments=await portal.appointments(latest.personId);
+          const candidates=[...(latest.slots||[]),...(latest.lastBookingAttempt?.slotId?[{id:latest.lastBookingAttempt.slotId,personId:latest.personId,doctorId:latest.lastBookingAttempt.doctorId,startsAt:latest.lastBookingAttempt.startsAt}]:[])];
+          const matched=appointments.find(a=>candidates.some(slot=>matchesBookedSlot(a,slot)));
+          if(matched){const slot=candidates.find(s=>matchesBookedSlot(matched,s));store.put('rules',latest.id,{...latest,status:'booked',slots:[],appointment:{...slot,doctorName:matched.doctorName,status:'active',portalAppointmentId:matched.id},message:'Запись подтверждена по картотеке.'});return send(200,{ok:true,status:'booked'});}
+          if(conflicts(latest,appointments).length)return send(409,{error:'В картотеке есть активная запись по этой специальности. Отслеживание не возобновлено.'});
+          const lastAttempt=Date.parse(latest.lastBookingAttempt?.at||latest.checkedAt||'');
+          if(Number.isFinite(lastAttempt)&&Date.now()-lastAttempt<120000)return send(409,{error:'Предыдущая попытка была недавно. Подождите две минуты и проверьте результат снова.'});
+          if(b.resume!==true)return send(200,{ok:true,status:latest.status,canResume:true});
+          store.put('rules',latest.id,{...latest,status:'active',slots:[],message:'В картотеке записи нет. Отслеживание возобновлено.',checkedAt:new Date().toISOString()});return send(200,{ok:true,status:'active'});
+        }
         if(m[2]==='book'&&req.method==='POST'){
           if(unresolved(latest))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
           if(!['active','error'].includes(latest.status)||latest.autoBook)throw Error('Ручная запись для этого правила недоступна');
           const b=await body(req),slot=selectSlots(latest,latest.slots||[]).find(s=>s.id===b.slotId);if(!slot)throw Error('Талон недоступен. Обновите список.');
-          store.put('rules',r.id,{...latest,status:'booking',message:'Проверяем результат записи…'});
-          try{const result=await portal.book(latest,slot);if(!result.confirmed)throw Error('Результат не подтверждён');store.put('rules',r.id,{...latest,status:'booked',slots:[],appointment:result.appointment,message:'Запись подтверждена'});return send(200,{ok:true});}
-          catch{store.put('rules',r.id,{...latest,status:'needs_review',slots:[],message:'Проверьте картотеку на портале: результат записи не подтверждён.'});return send(409,{error:'Проверьте картотеку на портале. Автоматический повтор отключён.'});}
+          let submitted=false;
+          try{
+            const result=await portal.book(latest,slot,{beforeSubmit:async()=>{store.put('rules',r.id,{...latest,status:'booking',message:'Проверяем результат записи…',lastBookingAttempt:{stage:'submit',outcome:'pending',slotId:slot.id,doctorId:slot.doctorId,startsAt:slot.startsAt,at:new Date().toISOString()}});submitted=true;}});
+            if(!result.confirmed)throw new BookingError('confirmation_missing','unknown','confirm','Результат не подтверждён');
+            store.put('rules',r.id,{...latest,status:'booked',slots:[],appointment:result.appointment,message:'Запись подтверждена'});return send(200,{ok:true});
+          }catch(error){const failure=bookingFailure({...latest,lastBookingAttempt:{slotId:slot.id,doctorId:slot.doctorId,startsAt:slot.startsAt}},error,{submitted});store.put('rules',r.id,failure);return send(409,{error:failure.message});}
         }
         return send(404,{error:'Маршрут не найден'});
       });
