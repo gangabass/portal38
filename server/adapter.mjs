@@ -32,7 +32,7 @@ export class PortalAccount extends Portal {
     const response=JSON.parse(await this.request('/service/record/'+endpoint+'/'+appointment.portalRecordId,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body}));
     if(response?.success===false||response?.error||response?.error_msg)throw Error('Портал отклонил отмену записи. Обновите список и проверьте её состояние.');
     const remaining=await this.appointments(personId);
-    if(remaining.some(a=>a.id===appointmentId||(a.portalRecordId===appointment.portalRecordId&&a.sourceSystem===appointment.sourceSystem)||(a.doctorId&&a.doctorId===appointment.doctorId&&a.startsAt&&a.startsAt===appointment.startsAt)))throw Error('Отмена не подтверждена: запись пока остаётся активной на портале. Обновите список.');
+    if(remaining.some(a=>a.id===appointmentId||(a.portalRecordId===appointment.portalRecordId&&a.sourceSystem===appointment.sourceSystem)||(!a.portalRecordId&&!a.doctorId)||(a.doctorId&&a.doctorId===appointment.doctorId&&(!a.startsAt||!appointment.startsAt||a.startsAt===appointment.startsAt))))throw Error('Отмена не подтверждена: запись пока остаётся активной на портале. Обновите список.');
     return {appointment,appointments:remaining};
   }
   async slots(rule){

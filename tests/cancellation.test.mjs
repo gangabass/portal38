@@ -43,7 +43,7 @@ test('disabled cancellation is rejected before remote request',async()=>{
  await assert.rejects(portal.cancelAppointment('1',id));assert.equal(calls.length,0);
 });
 test('portal rejection, persistent record and uncertain network result never confirm cancellation',async()=>{
- for(const options of [{response:'{"success":false}'},{after:record()},{after:record({button:false})},{response:new Error('Network timed out')}]){
+ for(const options of [{response:'{"success":false}'},{after:record()},{after:record({button:false})},{after:'<div class="serviceWrapper">Запись без параметров</div>'},{response:new Error('Network timed out')}]){
   const {portal,calls,id}=mockPortal(options);await assert.rejects(portal.cancelAppointment('1',id));assert.equal(calls.length,1);
  }
 });
