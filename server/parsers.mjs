@@ -9,7 +9,13 @@ export function portalDate(s) {
 }
 export function parsePeople(html) {
   const $=load(html),people=[];
-  $('.header').each((i,e)=>{const href=$(e).find('a[href$="/profiles"]').attr('href'),id=href?.match(/record\/(\d+)\/profiles$/)?.[1];if(id)people.push({id,name:text($(e).find('h2').text())});});
+  $('.header').each((i,e)=>{const href=$(e).find('a[href$="/profiles"]').attr('href'),id=href?.match(/record\/(\d+)\/profiles$/)?.[1];if(id){
+    const person={id,name:text($(e).find('h2').text())};
+    const link=$(e).next('.inner').find('p a[href*="/service/hospitals/view/"]').first();
+    const hospitalId=link.attr('href')?.match(/\/(\d+)$/)?.[1];
+    if(hospitalId)person.attachedClinic={hospitalId,name:text(link.text())};
+    people.push(person);
+  }});
   return people;
 }
 export function parseSpecialties(html) {
@@ -22,8 +28,9 @@ export function parseDoctors(html) {
   $('.doc-row').each((i,e)=>{const row=$(e),header=row.prevAll('.docsInLpuTableDescr').first(),a=row.find('.doc-name a'),id=row.attr('data-medstafffact_id');
     if(!id || row.hasClass('row-isPays') || row.find('.isPays i.paid').length)return;
     const address=text(header.find('.lpu-address').text()),hospitalId=header.find('a[href]').attr('href')?.match(/\/(\d+)$/)?.[1];
-    if(!hospitalId||!address)throw Error('Не удалось определить поликлинику врача. Формат портала изменился.');
-    const clinic={id:`${hospitalId}-${createHash('sha256').update(address).digest('hex').slice(0,12)}`,hospitalId,name:text(header.find('a').first().text()),address};
+    if(!hospitalId)throw Error('Не удалось определить поликлинику врача. Формат портала изменился.');
+    const name=text(header.find('a').first().text());
+    const clinic={id:`${hospitalId}-${createHash('sha256').update(address||`unit:${name}`).digest('hex').slice(0,12)}`,hospitalId,name,address};
     doctors.push({id,name:text(a.text()),clinic,url:a.attr('href'),specialtyName:text(row.find('.profile').text())});
   }); return doctors;
 }
@@ -32,6 +39,7 @@ export function parseSlots(html,rule,doctor) {
   if(!$('.timeTable').length)throw Error('Календарь врача недоступен или формат страницы изменился.');
   // Never assume that a timetable belongs to the chosen clinic.
   const address=text($('.lpuAddr').first().text());
+  if(!doctor.clinic.address)throw Error('У выбранного отделения на портале не указан адрес. Требуется проверка поликлиники.');
   if(!address || normalizeAddress(address)!==normalizeAddress(doctor.clinic.address))throw Error('Адрес календаря отличается от выбранной поликлиники. Требуется проверка.');
   $('td.free[data-timetablegraf_id]').each((i,e)=>{const a=$(e).attr(),startsAt=portalDate(a['data-timetablegraf_begtime']);
     if(a['data-person_id']!==rule.personId||a['data-medstafffact_id']!==doctor.id||!startsAt)return;

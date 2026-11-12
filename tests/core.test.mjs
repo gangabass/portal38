@@ -65,3 +65,21 @@ test('portal address variants normalize without merging different buildings',()=
 test('expired rules stop checking the portal',async()=>{
  let saved;await runRule({...rule,dateTo:'2029-12-31'},{now,portal:{appointments:()=>assert.fail()},save:r=>saved=r,notify:()=>assert.fail()});assert.equal(saved.status,'expired');assert.deepEqual(saved.slots,[]);
 });
+import {clinicOptions,defaultClinicId} from '../src/clinic-selection.mjs';
+test('people carry their own attached hospital from the adjacent card only',()=>{
+ const html='<div><div class="header"><h2>Первый</h2><a href="/service/record/1/profiles"></a></div><div class="inner"><p><a href="/service/hospitals/view/12">Поликлиника 12</a></p></div></div><div><div class="header"><h2>Второй</h2><a href="/service/record/2/profiles"></a></div><div class="inner"><p><a href="/service/hospitals/view/34">Поликлиника 34</a></p></div></div>';
+ assert.deepEqual(parsePeople(html).map(p=>p.attachedClinic.hospitalId),['12','34']);
+});
+test('one missing clinic address does not discard the complete specialty list',()=>{
+ const group=(id,name,address,doctor)=>`<div class="Lpuunit"><div class="docsInLpuTableDescr"><a href="/service/hospitals/view/${id}">${name}</a><span class="lpu-address">${address}</span></div><div class="doc-row" data-medstafffact_id="${doctor}"><span class="doc-name"><a href="/service/record/1/${doctor}/timetable">Врач</a></span></div></div>`;
+ const ds=parseDoctors(group('12','Прикреплённая','Тестовая, 1','101')+group('34','Отделение А','','102')+group('34','Отделение Б','','103'));
+ assert.equal(ds.length,3);assert.equal(ds[1].clinic.address,'');assert.notEqual(ds[1].clinic.id,ds[2].clinic.id);
+});
+test('attached clinic is preselected over other clinics regardless of order',()=>{
+ const people=[{id:'1',attachedClinic:{hospitalId:'12',name:'Своя поликлиника'}},{id:'2',attachedClinic:{hospitalId:'34',name:'Другая'}}];
+ const doctors=[{clinic:{id:'other',hospitalId:'34',name:'Другая',address:'Б, 2'}},{clinic:{id:'own',hospitalId:'12',name:'Своя',address:'А, 1'}}];
+ assert.equal(defaultClinicId(people,'1',doctors),'own');assert.equal(defaultClinicId(people,'2',doctors),'other');
+ assert.equal(clinicOptions(people,'1',doctors)[0].id,'own');
+ assert.equal(defaultClinicId(people,'1',[]),'attached-12');
+ assert.equal(defaultClinicId([{id:'3'}],'3',doctors),'');
+});
