@@ -37,5 +37,5 @@ export function createAppointmentsDialog({api,post,onChanged,formatDate}){
   catch(err){error=err.message;records=[];let updated=false;try{records=await api(`accounts/${accountId}/appointments?personId=${encodeURIComponent(personId)}`);updated=true;}catch{error+=' Не удалось обновить список. Нажмите «Обновить».';}await onChanged({accountId,personId,...(updated?{appointments:records}:{})});}
   finally{busy=false;render();dialog.querySelector('[data-dialog="refresh"]')?.focus();}
  });
- return {async open(context){if(busy)return;accounts=context.accounts;accountId=accounts.some(a=>a.id===context.accountId)?context.accountId:accounts[0]?.id||'';opener=document.activeElement;error='';message='';people=[];records=[];personId='';render();if(!dialog.open)dialog.showModal();if(accountId)await loadPeople(context.personId);}};
+ return {reset(){generation++;busy=false;loading=false;accounts=[];people=[];records=[];accountId='';personId='';error='';message='';if(dialog.open)dialog.close();dialog.innerHTML='';},async open(context){if(busy)return;accounts=context.accounts;accountId=accounts.some(a=>a.id===context.accountId)?context.accountId:accounts[0]?.id||'';opener=document.activeElement;error='';message='';people=[];records=[];personId='';render();if(!dialog.open)dialog.showModal();if(accountId)await loadPeople(context.personId);}};
 }

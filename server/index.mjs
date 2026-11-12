@@ -2,6 +2,7 @@ import http from 'node:http';
 import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import webpush from 'web-push';
 import {Store} from './store.mjs';
+import {createSessions,ownedPushSubscriptions} from './sessions.mjs';
 import {PortalAccount} from './adapter.mjs';
 import {BookingError,bookingFailure,matchesBookedSlot} from './booking-state.mjs';
 import {publicAppointment} from './parsers.mjs';
@@ -12,20 +13,21 @@ if(!env.FAMILY_ACCESS_KEY||env.FAMILY_ACCESS_KEY.length<24)throw Error('Configur
 const origins=(env.ALLOWED_ORIGINS||'').split(',').filter(Boolean),locks=new Map();
 const pushEnabled=Boolean(env.VAPID_PUBLIC_KEY&&env.VAPID_PRIVATE_KEY&&env.VAPID_SUBJECT);
 if(pushEnabled)webpush.setVapidDetails(env.VAPID_SUBJECT,env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY);
+const sessions=createSessions(store,async credentials=>{const portal=new PortalAccount(credentials);await portal.people();return {cookies:portal.cookies};});
 const accountPublic=a=>({id:a.id,label:a.label});
 const unresolved=r=>store.list('rules').some(other=>other.id!==r.id&&other.accountId===r.accountId&&other.personId===r.personId&&other.specialtyId===r.specialtyId&&['booking','needs_review'].includes(other.status));
 async function withAccount(id,fn){
   const previous=locks.get(id)||Promise.resolve();let release;const gate=new Promise(r=>release=r);const pending=previous.catch(()=>{}).then(()=>gate);locks.set(id,pending);await previous.catch(()=>{});
-  try{const a=store.get('accounts',id);if(!a)throw Error('Аккаунт не найден');const portal=new PortalAccount(a.credentials,a.cookies);try{return await fn(portal,a);}finally{if(store.get('accounts',id))store.put('accounts',id,{...a,cookies:portal.cookies});}}
+  try{const a=store.get('accounts',id);if(!a)throw Error('Аккаунт не найден');const portal=new PortalAccount(a.credentials,a.cookies);try{return await fn(portal,a);}finally{const current=store.get('accounts',id);if(current)store.put('accounts',id,{...current,cookies:portal.cookies});}}
   finally{release();if(locks.get(id)===pending)locks.delete(id);}
 }
-function notify(message){store.put('outbox',message.tag,{id:message.tag,message,createdAt:Date.now()});}
+function notify(message,accountId){if(!accountId)return;store.put('outbox',message.tag,{id:message.tag,accountId,message,createdAt:Date.now()});}
 async function sendPush(){
   if(!pushEnabled)return;
   for(const item of store.list('outbox')){
-    if(Date.now()-item.createdAt>3600000){store.delete('outbox',item.id);continue;}
+    if(!item.accountId||Date.now()-item.createdAt>3600000){store.delete('outbox',item.id);continue;}
     const delivered=item.delivered||[];let retry=false;
-    for(const s of store.list('push')){
+    for(const s of ownedPushSubscriptions(store,item.accountId)){
       if(delivered.includes(s.id))continue;
       try{await webpush.sendNotification(s.subscription,JSON.stringify({...item.message,url:env.APP_URL||'https://gangabass.github.io/portal38/'}),{TTL:300,timeout:15000});delivered.push(s.id);}
       catch(e){if([404,410].includes(e.statusCode))store.delete('push',s.id);else retry=true;}
@@ -39,7 +41,7 @@ async function tick(){if(ticking)return;ticking=true;
     await withAccount(rule.accountId,async portal=>{
       const fresh=store.get('rules',rule.id);if(!fresh||!['active','error'].includes(fresh.status))return;
       if(unresolved(fresh)){store.put('rules',fresh.id,{...fresh,status:'blocked',slots:[],message:'Другая попытка записи не подтверждена. Проверьте картотеку на портале.'});return;}
-      try{await runRule(fresh,{portal,previousIds:(fresh.slots||[]).map(s=>s.id),save:r=>store.put('rules',r.id,r),notify});}
+      try{await runRule(fresh,{portal,previousIds:(fresh.slots||[]).map(s=>s.id),save:r=>store.put('rules',r.id,r),notify:message=>notify(message,fresh.accountId)});}
       catch{const current=store.get('rules',rule.id);if(current&&['active','error','booking'].includes(current.status))store.put('rules',rule.id,{...current,status:current.status==='booking'?'needs_review':'error',message:current.status==='booking'?'Проверьте картотеку на портале: результат записи не подтверждён.':'Не удалось проверить портал. Повторим через минуту.',checkedAt:new Date().toISOString()});}
     }).catch(()=>{});
   }await sendPush();}finally{ticking=false;}}
@@ -59,18 +61,27 @@ const server=http.createServer(async(req,res)=>{
   if(path==='/api/health'&&req.method==='GET')return send(200,{ok:true,service:'portal38',bookingVerified:false});
   const key=(req.headers.authorization||'').replace(/^Bearer /,'');
   const ip=req.socket.remoteAddress,attempt=attempts.get(ip);
-  if(attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
-  if(!timingSafeEqual(hash(key),hash(env.FAMILY_ACCESS_KEY))){if(attempts.size>1000)attempts.clear();attempts.set(ip,{until:Date.now()+60000,count:attempt&&attempt.until>Date.now()?attempt.count+1:1});return send(401,{error:'Неверный семейный ключ доступа'});}
+  if(path==='/api/session'&&req.method==='POST'&&attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
+  const rejectLogin=()=>{if(attempts.size>1000)attempts.clear();attempts.set(ip,{until:Date.now()+60000,count:attempt&&attempt.until>Date.now()?attempt.count+1:1});};
+  if(path==='/api/session'&&req.method==='POST'){
+    if(!timingSafeEqual(hash(key),hash(env.FAMILY_ACCESS_KEY))){rejectLogin();return send(401,{error:'Неверный токен доступа к сервису'});}
+    try{const b=await body(req);const result=await sessions.login(b.login,b.password);attempts.delete(ip);return send(201,result);}
+    catch{rejectLogin();return send(401,{error:'Не удалось войти на портал. Проверьте логин и пароль либо повторите позже.'});}
+  }
+  const session=sessions.resolve(key);
+  if(!session)return send(401,{error:'Войдите с личным логином и паролем портала.'});
+  const accountId=session.accountId;
+  // Enforce ownership before dispatching any read or mutation, including guessed URLs.
+  const targetAccount=path.match(/^\/api\/accounts\/([\w-]+)/)?.[1];
+  if(targetAccount&&targetAccount!==accountId)return send(404,{error:'Аккаунт не найден'});
+  const targetRule=path.match(/^\/api\/rules\/([\w-]+)/)?.[1];
+  if(targetRule&&store.get('rules',targetRule)?.accountId!==accountId)return send(404,{error:'Правило не найдено'});
   try{
     let m;
-    if(path==='/api/accounts'&&req.method==='GET')return send(200,store.list('accounts').map(accountPublic));
-    if(path==='/api/accounts'&&req.method==='POST'){
-      const b=await body(req);if(![b.label,b.login,b.password].every(x=>typeof x==='string'&&x.trim()&&x.length<=300))throw Error('Введите название, логин и пароль');
-      if(store.list('accounts').length>=5)throw Error('Достигнут лимит семейных аккаунтов');
-      const portal=new PortalAccount({login:b.login,password:b.password});const people=await portal.people();const id=randomUUID();
-      store.put('accounts',id,{id,label:b.label,credentials:{login:b.login,password:b.password},cookies:portal.cookies});return send(201,{id,label:b.label,people});
-    }
-    if((m=path.match(/^\/api\/accounts\/([\w-]+)$/))&&req.method==='DELETE')return await withAccount(m[1],async()=>{for(const r of store.list('rules').filter(r=>r.accountId===m[1]))store.delete('rules',r.id);store.delete('accounts',m[1]);return send(200,{ok:true});});
+    if(path==='/api/session'&&req.method==='DELETE'){sessions.revoke(key);return send(200,{ok:true});}
+    if(path==='/api/accounts'&&req.method==='GET')return send(200,[accountPublic(store.get('accounts',accountId))]);
+    if(path==='/api/accounts'&&req.method==='POST')return send(405,{error:'Для другого аккаунта выйдите и войдите с его логином портала.'});
+    if((m=path.match(/^\/api\/accounts\/([\w-]+)$/))&&req.method==='DELETE')return await withAccount(m[1],async()=>{for(const r of store.list('rules').filter(r=>r.accountId===m[1]))store.delete('rules',r.id);for(const kind of ['sessions','push','outbox'])for(const item of store.list(kind))if(item.accountId===m[1])store.delete(kind,item.id);store.delete('accounts',m[1]);return send(200,{ok:true});});
     if((m=path.match(/^\/api\/accounts\/([\w-]+)\/(people|specialties|doctors|appointments)$/))&&req.method==='GET')return await withAccount(m[1],async portal=>{
       const personId=url.searchParams.get('personId'),specialtyId=url.searchParams.get('specialtyId');
       if(m[2]!=='people'&&!/^\d+$/.test(personId||''))throw Error('Выберите человека');
@@ -94,10 +105,10 @@ const server=http.createServer(async(req,res)=>{
         }catch{return send(409,{error:'Не удалось подтвердить отмену. Обновите список записей перед новой попыткой. Связанные отслеживания поставлены на паузу.'});}
       });
     }
-    if(path==='/api/rules'&&req.method==='GET')return send(200,store.list('rules'));
+    if(path==='/api/rules'&&req.method==='GET')return send(200,store.list('rules').filter(r=>r.accountId===accountId));
     if(path==='/api/rules'&&req.method==='POST'){
-      const b=await body(req);validateRule(b);if(unresolved(b))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
-      if(store.list('rules').length>=20)throw Error('Достигнут лимит правил');
+      const b=await body(req);if(b.accountId!==accountId)return send(404,{error:'Аккаунт не найден'});validateRule(b);if(unresolved(b))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
+      if(store.list('rules').filter(r=>r.accountId===accountId).length>=20)throw Error('Достигнут лимит правил');
       return await withAccount(b.accountId,async portal=>{
         const people=await portal.people(),specialties=await portal.specialties(b.personId),doctors=await portal.doctors(b.personId,b.specialtyId);
         const clinic=doctors.find(d=>d.clinic.id===b.clinicId)?.clinic;
@@ -149,10 +160,10 @@ const server=http.createServer(async(req,res)=>{
       if(!pushEnabled)throw Error('Push пока не настроен на сервере');
       const b=await body(req),s=b.subscription;let u;try{u=new URL(s?.endpoint);}catch{throw Error('Некорректная push-подписка');}
       if(u.protocol!=='https:'||u.port||u.username||u.password||!['fcm.googleapis.com','updates.push.services.mozilla.com','web.push.apple.com'].some(h=>u.hostname===h||u.hostname.endsWith('.'+h))||!s.keys?.p256dh||!s.keys?.auth)throw Error('Неподдерживаемая push-подписка');
-      const id=createHash('sha256').update(s.endpoint).digest('hex');store.put('push',id,{id,subscription:s});return send(200,{id});
+      const id=createHash('sha256').update(s.endpoint).digest('hex');store.put('push',id,{id,accountId,subscription:s});return send(200,{id});
     }
-    if(path==='/api/push/subscription'&&req.method==='DELETE'){const b=await body(req);store.delete('push',b.id||'');return send(200,{ok:true});}
-    if(path==='/api/push/test'&&req.method==='POST'){notify({title:'Portal38',body:'Уведомления работают',tag:'test'});await sendPush();return send(200,{ok:true});}
+    if(path==='/api/push/subscription'&&req.method==='DELETE'){const b=await body(req);if(store.get('push',b.id||'')?.accountId===accountId)store.delete('push',b.id);return send(200,{ok:true});}
+    if(path==='/api/push/test'&&req.method==='POST'){notify({title:'Portal38',body:'Уведомления работают',tag:'test-'+accountId},accountId);await sendPush();return send(200,{ok:true});}
     send(404,{error:'Маршрут не найден'});
   }catch(e){const message=/[А-Яа-яЁё]/.test(e.message)?e.message:'Не удалось выполнить запрос. Проверьте настройки сервера и доступность портала.';send(400,{error:message});}
 });
