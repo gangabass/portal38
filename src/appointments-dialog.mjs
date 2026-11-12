@@ -9,8 +9,8 @@ export function createAppointmentsDialog({api,post,onChanged,formatDate}){
   dialog.setAttribute('aria-labelledby','appointments-title');
  }
  async function loadRecords(){
-  const version=++generation;loading=true;error='';records=[];render();
-  try{const data=await api(`accounts/${accountId}/appointments?personId=${encodeURIComponent(personId)}`);if(version===generation)records=data;}
+  const version=++generation,context={accountId,personId};loading=true;error='';records=[];render();
+  try{const data=await api(`accounts/${accountId}/appointments?personId=${encodeURIComponent(personId)}`);if(version===generation){records=data;await onChanged({...context,appointments:data});}}
   catch(err){if(version===generation)error=err.message;}
   finally{if(version===generation){loading=false;render();}}
  }
