@@ -20,6 +20,8 @@ export function parsePeople(html) {
     const link=$(e).next('.inner').find('p a[href*="/service/hospitals/view/"]').first();
     const hospitalId=link.attr('href')?.match(/\/(\d+)$/)?.[1];
     if(hospitalId)person.attachedClinic={hospitalId,name:text(link.text())};
+    const age=$(e).find('[data-person_ageendyear]').first().attr('data-person_ageendyear');
+    if(age!==undefined&&/^\d{1,3}$/.test(age)&&Number(age)<=130){person.ageAtYearEnd=Number(age);person.ageReferenceYear=Number(new Intl.DateTimeFormat('en',{timeZone:'Asia/Irkutsk',year:'numeric'}).format(new Date()));}
     people.push(person);
   }});
   return people;
@@ -40,7 +42,7 @@ export function parseDoctors(html) {
     doctors.push({id,name:text(a.text()),clinic,url:a.attr('href'),specialtyName:text(row.find('.profile').text())});
   }); return doctors;
 }
-export function parseSlots(html,rule,doctor) {
+export function parseSlots(html,rule,doctor,person=null) {
   const $=load(html),slots=[];
   if(!$('.timeTable').length)throw Error('Календарь врача недоступен или формат страницы изменился.');
   // Never assume that a timetable belongs to the chosen clinic.
@@ -51,7 +53,10 @@ export function parseSlots(html,rule,doctor) {
     if(a['data-person_id']!==rule.personId||a['data-medstafffact_id']!==doctor.id||!startsAt)return;
     // Only ordinary in-person appointments; remote consultations need additional consent fields.
     if(a['data-timetabletype_id']!=='1')return;
-    slots.push({id:a['data-timetablegraf_id'],personId:rule.personId,doctorId:doctor.id,doctorName:doctor.name,clinicId:doctor.clinic.id,specialtyId:rule.specialtyId,startsAt,url:doctor.url});
+    const note=$(e).closest('table').find('tr.notes').children().eq($(e).index()).text();
+    const annotation=text(load([a.alt,a.title,a.desc,note].filter(Boolean).join(' ').replace(/<br\s*\/?>/gi,' ')).text());
+    if(!eligibleForSlot(annotation,person,startsAt))return;
+    slots.push({id:a['data-timetablegraf_id'],personId:rule.personId,doctorId:doctor.id,doctorName:doctor.name,clinicId:doctor.clinic.id,specialtyId:rule.specialtyId,startsAt,url:doctor.url,annotation});
   });return slots;
 }
 export function parseAppointments(html,personId,specialties=[]) {
@@ -97,4 +102,11 @@ export function normalizeAddress(value) {
 export function bookingNotice(html){
   try{const info=JSON.parse(html);return text(info.error_msg||info.error||info.msg||info.message||'').slice(0,1200);}catch{}
   const $=load(html);return [...new Set($('.contextAlert,.alert,.alert-danger,.error-message,.error_msg,.popup.message,.popup.infoWindow').map((i,e)=>text($(e).text())).get().filter(Boolean))].join(' | ').slice(0,1200);
+}
+
+export function eligibleForSlot(annotation,person,startsAt){
+  if(!/(?:до\s*(?:1|одного)\s*года|до\s*года)/i.test(annotation||''))return true;
+  const visitYear=Number(String(startsAt).slice(0,4));
+  // age at year-end is only an upper bound; do not assume that a one-year-old is still an infant.
+  return Number.isInteger(person?.ageAtYearEnd)&&person.ageAtYearEnd===0&&person.ageReferenceYear===visitYear;
 }

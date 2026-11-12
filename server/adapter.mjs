@@ -10,7 +10,7 @@ export class PortalAccount extends Portal {
     if(!parsePeople(html).length)throw Error('В картотеке не найдено людей.');
     return html;
   }
-  async people(){return parsePeople(await this.cards());}
+  async people(){if(this.peopleCache&&Date.now()-this.peopleCacheAt<30000)return this.peopleCache;this.peopleCache=parsePeople(await this.cards());this.peopleCacheAt=Date.now();return this.peopleCache;}
   async specialties(personId){await this.assertPerson(personId);return parseSpecialties(await this.request(`/service/record/${personId}/profiles`));}
   async assertPerson(id){if(!(await this.people()).some(p=>p.id===id))throw Error('Человек не найден в картотеке аккаунта.');}
   async doctors(personId,specialtyId){
@@ -37,9 +37,10 @@ export class PortalAccount extends Portal {
     return {appointment,appointments:remaining};
   }
   async slots(rule){
+    const person=(await this.people()).find(p=>p.id===rule.personId);if(!person)throw Error('Человек не найден в картотеке аккаунта.');
     const doctors=(await this.doctors(rule.personId,rule.specialtyId)).filter(d=>d.clinic.id===rule.clinicId&&(!rule.doctorIds.length||rule.doctorIds.includes(d.id)));
     const slots=[];
-    for(const doctor of doctors)slots.push(...parseSlots(await this.request(doctor.url),rule,doctor));
+    for(const doctor of doctors)slots.push(...parseSlots(await this.request(doctor.url),rule,doctor,person));
     return slots;
   }
   async prepareBooking(rule,slot){
@@ -68,7 +69,8 @@ export class PortalAccount extends Portal {
         const appointment=records.find(a=>matchesBookedSlot(a,current));
         if(appointment)return {confirmed:true,appointment:{...current,status:'active',portalAppointmentId:appointment.id}};
       }
-      const error=new BookingError('confirmation_missing','unknown','confirm','Запрос выполнен, но запись не найдена в картотеке.');error.portalNotice=notice;throw error;
+      const ageRejected=/только детей до года/i.test(notice);
+      const error=new BookingError(ageRejected?'age_restricted':'confirmation_missing',ageRejected?'rejected':'unknown',ageRejected?'submit':'confirm',ageRejected?'Портал отклонил талон с возрастным ограничением.':'Запрос выполнен, но запись не найдена в картотеке.');error.portalNotice=notice;throw error;
     }catch(error){if(error instanceof BookingError)throw error;throw new BookingError('confirmation_failed','unknown','confirm','Не удалось проверить картотеку после запроса записи.',error);}
   }
 }

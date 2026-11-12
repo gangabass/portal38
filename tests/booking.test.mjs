@@ -50,3 +50,20 @@ test('portal booking notices exclude form values and scripts',()=>{
  assert.equal(bookingNotice('<div class="contextAlert">Запись недоступна</div><input name="csrf" value="private-token"><script>secret()</script>'),'Запись недоступна');
  assert.equal(bookingNotice('{"error_msg":"Нет прикрепления"}'),'Нет прикрепления');
 });
+import {eligibleForSlot,parseSlots,parsePeople} from '../server/parsers.mjs';
+test('infant-only slots are excluded for older children and unknown age',()=>{
+ for(const annotation of ['ДО 1 ГОДА','До одного года','Дети до года']){assert.equal(eligibleForSlot(annotation,{ageAtYearEnd:14,ageReferenceYear:2030},slot.startsAt),false);assert.equal(eligibleForSlot(annotation,null,slot.startsAt),false);}
+ assert.equal(eligibleForSlot('ДО 1 ГОДА',{ageAtYearEnd:0,ageReferenceYear:2030},slot.startsAt),true);assert.equal(eligibleForSlot('ДО 1 ГОДА',{ageAtYearEnd:1,ageReferenceYear:2030},slot.startsAt),false);
+ assert.equal(eligibleForSlot('ДО 1 ГОДА',{ageAtYearEnd:0,ageReferenceYear:2029},slot.startsAt),false);
+ assert.equal(eligibleForSlot('Прием 16 и 2 уч. каб. 103',null,slot.startsAt),true);
+});
+test('calendar title, tooltip and day notes all enforce the infant restriction',()=>{
+ const doctor={id:'9',name:'Врач',clinic:{id:'c',address:'Тестовая, 1'}};
+ for(const part of ['title="ДО 1 ГОДА"','desc="До 1 года&lt;br&gt;ДО 1 ГОДА"','']){
+  const html=`<span class="lpuAddr">Тестовая, 1</span><table class="timeTable">${part?'':'<tr class="notes"><td>До 1 года</td><td></td></tr>'}<tr><td class="free" data-timetablegraf_id="early" data-person_id="1" data-medstafffact_id="9" data-timetabletype_id="1" data-timetablegraf_begtime="2030-11-20 10:30:00" ${part}></td><td class="free" data-timetablegraf_id="later" data-person_id="1" data-medstafffact_id="9" data-timetabletype_id="1" data-timetablegraf_begtime="2030-11-21 10:30:00"></td></tr></table>`;
+  assert.deepEqual(parseSlots(html,rule,doctor,{ageAtYearEnd:14,ageReferenceYear:2030}).map(s=>s.id),['later']);
+ }
+});
+test('portal card age is parsed without guessing a birth date',()=>{
+ const people=parsePeople('<div class="header"><h2>Тест</h2><a href="/service/record/1/profiles"></a><a data-person_ageendyear="14"></a></div>');assert.equal(people[0].ageAtYearEnd,14);assert.equal('birthDate'in people[0],false);
+});
