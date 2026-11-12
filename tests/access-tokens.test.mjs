@@ -51,7 +51,7 @@ test('usage ledger handles confirmation, definite rejection, uncertain submissio
  mode='rejected';await assert.rejects(portal.book(rule,{...slot,doctorId:'2'}));assert.equal(tokens.usage(t.id).pending,0);
  mode='unknown';await assert.rejects(portal.book(rule,{...slot,doctorId:'3'}));assert.equal(tokens.usage(t.id).pending,1);
  await assert.rejects(portal.book(rule,{...slot,doctorId:'4'},{beforeSubmit(){throw Error('Disk full');}}));assert.equal(tokens.usage(t.id).pending,1);
- const pending=store.list('bookingUsage').find(r=>r.status==='pending');store.put('bookingUsage',pending.id,{...pending,at:Date.now()-120001});tokens.reconcile(rule,[]);assert.equal(tokens.usage(t.id).pending,0);assert.equal(tokens.usage(t.id).bookings,1);
+ const pending=store.list('bookingUsage').find(r=>r.status==='pending');store.put('bookingUsage',pending.id,{...pending,at:Date.now()-120001});tokens.reconcile(rule,[{personId:'1',status:'active',unclassified:true}]);assert.equal(tokens.usage(t.id).pending,1);tokens.reconcile(rule,[]);assert.equal(tokens.usage(t.id).pending,0);assert.equal(tokens.usage(t.id).bookings,1);
 }));
 
 test('billing month changes at midnight in Irkutsk; tariff downgrade pauses excess trackers without altering them',()=>fixture(store=>{

@@ -41,6 +41,6 @@ export function createAccessTokens(store,legacyKey){
    store.put('bookingUsage',key,{id:key,fingerprint,accessTokenId:id,accountId:rule.accountId,ruleId:rule.id,personId:rule.personId,doctorId:slot.doctorId,startsAt:slot.startsAt,month:billingMonth(now),at:now,status:'pending'});return key;
   },
   settle(key,outcome){const record=key&&store.get('bookingUsage',key);if(!record)return;if(outcome==='confirmed')store.put('bookingUsage',key,{...record,status:'confirmed'});else if(outcome==='rejected')store.delete('bookingUsage',key);},
-  reconcile(rule,appointments){const attempts=store.list('bookingUsage').filter(r=>r.ruleId===rule.id&&r.status==='pending');for(const r of attempts){const match=appointments.some(a=>a.personId===r.personId&&a.doctorId===r.doctorId&&a.status==='active'&&Date.parse(a.startsAt)===Date.parse(r.startsAt));if(match)this.settle(r.id,'confirmed');else if(Date.now()-r.at>=120000)this.settle(r.id,'rejected');}}
+  reconcile(rule,appointments){const attempts=store.list('bookingUsage').filter(r=>r.ruleId===rule.id&&r.status==='pending');for(const r of attempts){const match=appointments.some(a=>a.personId===r.personId&&a.doctorId===r.doctorId&&a.status==='active'&&Date.parse(a.startsAt)===Date.parse(r.startsAt));if(match)this.settle(r.id,'confirmed');else if(Date.now()-r.at>=120000&&!appointments.some(a=>a.personId===r.personId&&a.status==='active'&&(!a.doctorId||!a.startsAt)))this.settle(r.id,'rejected');}}
  };
 }
