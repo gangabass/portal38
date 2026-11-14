@@ -1,9 +1,11 @@
+import {installDatePickers} from './date-picker.mjs';
 import './style.css';
 import {createAdminPanel} from './admin-panel.mjs';
 import {createAppointmentsDialog} from './appointments-dialog.mjs';
 import {clinicOptions,defaultClinicId} from './clinic-selection.mjs';
 import {hasAppointmentConflict} from './appointment-state.mjs';
 const root=document.querySelector('#app');
+installDatePickers(root);
 const state={base:localStorage.getItem('portal38-api')||import.meta.env.VITE_API_BASE_URL||(import.meta.env.DEV?'http://localhost:3002':''),key:localStorage.getItem('portal38-key')||sessionStorage.getItem('portal38-key')||'',session:localStorage.getItem('portal38-session')||'',access:null,connected:false,view:'dashboard',accounts:[],people:[],specialties:[],doctors:[],appointments:[],rules:[],loading:false,error:'',generation:0};
 state.restoring=Boolean(state.session&&state.base);
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
