@@ -8,6 +8,12 @@ test('personal API sessions isolate accounts, rules, mutations and push; shared 
   const port=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Server did not start')),10000);child.stdout.on('data',b=>{const m=b.toString().match(/listening (\d+)/);if(m){clearTimeout(timer);resolve(m[1]);}});child.once('exit',()=>{clearTimeout(timer);reject(Error('Server exited'));});});
   const base=`http://127.0.0.1:${port}/api/`,headers={Authorization:`Bearer ${token}`};
   assert.equal((await fetch(base+'health')).status,200);
+  const helperOrigin='chrome-extension://'+'a'.repeat(32);
+  const preflight=await fetch(base+'session/esia',{method:'OPTIONS',headers:{Origin:helperOrigin}});assert.equal(preflight.status,204);
+  assert.equal((await fetch(base+'accounts',{headers:{Origin:helperOrigin}})).status,403);
+  assert.equal((await fetch(base+'session/esia',{method:'POST',headers:{Origin:helperOrigin,Authorization:'Bearer bad','Content-Type':'application/json'},body:'{}'})).status,401);
+  assert.equal((await fetch(base+'session/esia',{method:'POST',headers:{Origin:helperOrigin,Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({cookies:[{name:'s',value:'x',domain:'esia.gosuslugi.ru',path:'/'}]})})).status,401);
+
   for(const value of [key,token,'incorrect'])assert.equal((await fetch(base+'admin/tokens',{headers:{Authorization:`Bearer ${value}`}})).status,401);
   const adminHeaders={Authorization:`Bearer ${adminKey}`,'Content-Type':'application/json'};
   const adminData=await (await fetch(base+'admin/tokens',{headers:adminHeaders})).json();assert.deepEqual(adminData.types.map(t=>t.name),['Обычный','Премиум']);assert.equal(adminData.tokens.length,2);
