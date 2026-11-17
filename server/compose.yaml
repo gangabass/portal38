@@ -9,8 +9,15 @@ services:
     environment:
       HOST: 0.0.0.0
       DATA_DIR: /data
+      PORTAL_ACCOUNT_FILE: /run/secrets/portal-account.json
     volumes:
       - portal38-data:/data
+      - type: bind
+        source: ../private/portal-account.json
+        target: /run/secrets/portal-account.json
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - dnevnik-proxy
     stop_grace_period: 30s

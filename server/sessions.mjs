@@ -4,6 +4,7 @@ const lifetime=90*86400000;
 export function createSessions(store,verify,accessTokens=null,verifyCookies=null){
  return {
   async login(login,password,accessTokenId){
+   if(accessTokens?.personId(accessTokenId))throw Error('Для входа используйте личный токен.');
    if(accessTokens&&!accessTokens.active(accessTokenId))throw Error('Токен доступа приостановлен или удалён.');
    if(![login,password].every(x=>typeof x==='string'&&x.trim()&&x.length<=300))throw Error('Введите логин и пароль портала.');
    login=login.trim();
@@ -15,6 +16,7 @@ export function createSessions(store,verify,accessTokens=null,verifyCookies=null
    return this.finish(account,accessTokenId);
   },
   async importPortal(cookies,accessTokenId){
+   if(accessTokens?.personId(accessTokenId))throw Error('Для входа используйте личный токен.');
    if(!verifyCookies)throw Error('Вход через ЕСИА не настроен.');
    if(accessTokens&&!accessTokens.active(accessTokenId))throw Error('Токен доступа приостановлен или удалён.');
    const verified=await verifyCookies(cookies);

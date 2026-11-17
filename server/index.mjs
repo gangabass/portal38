@@ -1,3 +1,5 @@
+import {existsSync,readFileSync} from 'node:fs';
+import {createRegistration} from './registration.mjs';
 import http from 'node:http';
 import {load} from 'cheerio';
 import {importCookies} from './cookies.mjs';
@@ -33,6 +35,18 @@ async function withAccount(id,fn){
   try{const a=store.get('accounts',id);if(!a)throw Error('Аккаунт не найден');const portal=guardBookingAccess(new PortalAccount(a.credentials,a.cookies),accessTokens);portal.authRevision=a.authRevision;try{return await fn(portal,a);}catch(e){if(e.code==='portal_session_expired'){const current=store.get('accounts',id);if(current&&current.authRevision===a.authRevision)store.put('accounts',id,{...current,authRequired:true});}throw e;}finally{const current=store.get('accounts',id);if(current&&current.authRevision===a.authRevision)store.put('accounts',id,{...current,cookies:portal.cookies});}}
   finally{release();if(locks.get(id)===pending)locks.delete(id);}
 }
+const credentialsFile=env.PORTAL_ACCOUNT_FILE||'private/portal-account.json';
+let registrationAccountId=env.REGISTRATION_ACCOUNT_ID;
+if(existsSync(credentialsFile)){
+ const credentials=JSON.parse(readFileSync(credentialsFile,'utf8').replace(/^\uFEFF/,''));
+ if(![credentials.login,credentials.password].every(v=>typeof v==='string'&&v.trim()&&v.length<=300))throw Error('Некорректный файл рабочего аккаунта.');
+ credentials.login=credentials.login.trim();
+ const existing=store.list('accounts').find(a=>a.credentials?.login?.trim()===credentials.login);
+ registrationAccountId=existing?.id||randomUUID();
+ store.put('accounts',registrationAccountId,{...existing,id:registrationAccountId,label:existing?.label||'Картотека сервиса',credentials,authMethod:'password',authRequired:false,authRevision:existing?.authRevision||randomUUID(),cookies:existing?.cookies||{}});
+}
+if(registrationAccountId)store.put('settings','registration-account',{id:'registration-account',accountId:registrationAccountId});
+const registration=createRegistration({store,accessTokens,secret:env.ENCRYPTION_KEY,accountId:registrationAccountId,ensurePerson:(id,data)=>withAccount(id,portal=>{if(!portal.addPerson)throw Error('Добавление в картотеку пока не настроено.');return portal.addPerson(data);})});
 function notify(message,accountId,accessTokenId){if(!accountId||!accessTokens.active(accessTokenId))return;store.put('outbox',message.tag,{id:message.tag,accountId,accessTokenId,message,createdAt:Date.now()});}
 async function sendPush(){
   if(!pushEnabled)return;
@@ -79,7 +93,7 @@ const server=http.createServer(async(req,res)=>{
   if(path==='/api/health'&&req.method==='GET')return send(200,{ok:true,service:'portal38',bookingVerified:false,version:'0.2.0',esia:true});
   const key=(req.headers.authorization||'').replace(/^Bearer /,'');
   const ip=req.socket.remoteAddress,attempt=attempts.get(ip);
-  if((path.startsWith('/api/admin')||(path==='/api/session'||path==='/api/session/esia'))&&attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
+  if((path.startsWith('/api/admin')||(path==='/api/session'||path==='/api/session/esia'||path==='/api/register'||path==='/api/session/token'))&&attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
   const rejectLogin=()=>{if(attempts.size>1000)attempts.clear();attempts.set(ip,{until:Date.now()+60000,count:attempt&&attempt.until>Date.now()?attempt.count+1:1});};
   if(path==='/api/admin'||path.startsWith('/api/admin/')){
     if(!env.ADMIN_ACCESS_KEY||env.ADMIN_ACCESS_KEY.length<24)return send(503,{error:'Администратор не настроен.'});
@@ -87,11 +101,18 @@ const server=http.createServer(async(req,res)=>{
     try{
       if(path==='/api/admin/tokens'&&req.method==='GET')return send(200,{tokens:accessTokens.list(),types:accessTokens.types});
       if(path==='/api/admin/tokens'&&req.method==='POST')return send(201,accessTokens.create(await body(req)));
+      const payment=path.match(/^\/api\/admin\/tokens\/([\w-]+)\/payment$/);
+      if(payment&&req.method==='POST'){const b=await body(req);return send(200,accessTokens.confirmPayment(payment[1],b.paid));}
       const target=path.match(/^\/api\/admin\/tokens\/([\w-]+)$/);
       if(target&&req.method==='PATCH')return send(200,accessTokens.update(target[1],await body(req)));
       if(target&&req.method==='DELETE'){accessTokens.remove(target[1]);return send(200,{ok:true});}
       return send(404,{error:'Маршрут не найден'});
     }catch(e){return send(400,{error:e.message});}
+  }
+  if((path==='/api/register'||path==='/api/session/token')&&req.method==='POST'){
+    rejectLogin();
+    try{return send(201,path==='/api/register'?await registration.register(await body(req)):registration.login(key));}
+    catch(e){return send(400,{error:/[А-Яа-яЁё]/.test(e.message)?e.message:'Не удалось выполнить регистрацию. Повторите позже.'});}
   }
   if((path==='/api/session'||path==='/api/session/esia')&&req.method==='POST'){
     const grant=accessTokens.find(key);
@@ -101,28 +122,36 @@ const server=http.createServer(async(req,res)=>{
   }
   const session=sessions.resolve(key);
   if(!session)return send(401,{error:'Войдите с личным логином и паролем портала.'});
-  const accountId=session.accountId;
+  const superAccess=accessTokens.isSuper(session.accessTokenId);
+  const allowedAccount=id=>id===session.accountId||(superAccess&&id===registrationAccountId);
+  const requestedAccount=path.match(/^\/api\/accounts\/([\w-]+)/)?.[1];
+  const accountId=requestedAccount&&allowedAccount(requestedAccount)?requestedAccount:session.accountId;
+  const personIdForToken=accessTokens.personId(session.accessTokenId);
+  const ownsRule=r=>Boolean(r)&&allowedAccount(r.accountId)&&(!personIdForToken||r.accessTokenId===session.accessTokenId);
+
   // Enforce ownership before dispatching any read or mutation, including guessed URLs.
   const targetAccount=path.match(/^\/api\/accounts\/([\w-]+)/)?.[1];
   if(targetAccount&&targetAccount!==accountId)return send(404,{error:'Аккаунт не найден'});
   const targetRule=path.match(/^\/api\/rules\/([\w-]+)/)?.[1];
-  if(targetRule&&store.get('rules',targetRule)?.accountId!==accountId)return send(404,{error:'Правило не найдено'});
+  if(targetRule&&!ownsRule(store.get('rules',targetRule)))return send(404,{error:'Правило не найдено'});
   try{
     let m;
     if(path==='/api/session'&&req.method==='DELETE'){sessions.revoke(key);return send(200,{ok:true});}
-    if(path==='/api/access'&&req.method==='GET'){const t=accessTokens.list().find(t=>t.id===session.accessTokenId);return send(200,{name:t.name,type:t.type,typeName:accessTokens.types.find(v=>v.id===t.type).name,limits:t.limits,usage:t.usage});}
-    if(path==='/api/accounts'&&req.method==='GET')return send(200,[accountPublic(store.get('accounts',accountId))]);
+    if(path==='/api/access'&&req.method==='GET'){const t=accessTokens.list().find(t=>t.id===session.accessTokenId);return send(200,{personId:personIdForToken,superAccess:accessTokens.isSuper(session.accessTokenId),name:t.name,type:t.type,paid:t.paid,typeName:personIdForToken?'Личный':accessTokens.types.find(v=>v.id===t.type).name,limits:t.limits,usage:t.usage});}
+    if(path==='/api/accounts'&&req.method==='GET')return send(200,superAccess?store.list('accounts').filter(a=>allowedAccount(a.id)).map(accountPublic):[personIdForToken?{id:accountId,label:'Моя картотека'}:accountPublic(store.get('accounts',accountId))]);
     if(path==='/api/accounts'&&req.method==='POST')return send(405,{error:'Для другого аккаунта выйдите и войдите с его логином портала.'});
-    if((m=path.match(/^\/api\/accounts\/([\w-]+)$/))&&req.method==='DELETE')return await withAccount(m[1],async()=>{for(const r of store.list('rules').filter(r=>r.accountId===m[1]))store.delete('rules',r.id);for(const kind of ['sessions','push','outbox'])for(const item of store.list(kind))if(item.accountId===m[1])store.delete(kind,item.id);store.delete('accounts',m[1]);return send(200,{ok:true});});
+    if((m=path.match(/^\/api\/accounts\/([\w-]+)$/))&&req.method==='DELETE')return await withAccount(m[1],async()=>{if(store.list('accessTokens').some(t=>t.boundAccountId===accountId&&t.personId))throw Error('Общую картотеку нельзя отключить из приложения.');for(const r of store.list('rules').filter(r=>r.accountId===m[1]))store.delete('rules',r.id);for(const kind of ['sessions','push','outbox'])for(const item of store.list(kind))if(item.accountId===m[1])store.delete(kind,item.id);store.delete('accounts',m[1]);return send(200,{ok:true});});
     if((m=path.match(/^\/api\/accounts\/([\w-]+)\/(people|specialties|doctors|appointments)$/))&&req.method==='GET')return await withAccount(m[1],async portal=>{
       const personId=url.searchParams.get('personId'),specialtyId=url.searchParams.get('specialtyId');
       if(m[2]!=='people'&&!/^\d+$/.test(personId||''))throw Error('Выберите человека');
       if(m[2]==='doctors'&&!/^\d+$/.test(specialtyId||''))throw Error('Выберите специальность');
+      if(m[2]!=='people')accessTokens.assertPerson(session.accessTokenId,personId);
       const data=await portal[m[2]](...(m[2]==='people'?[]:[personId,...(m[2]==='doctors'?[specialtyId]:[])]));
-      return send(200,m[2]==='appointments'?data.map(publicAppointment):data);
+      return send(200,m[2]==='appointments'?data.map(publicAppointment):m[2]==='people'&&personIdForToken?data.filter(p=>p.id===personIdForToken):data);
     });
     if((m=path.match(/^\/api\/accounts\/([\w-]+)\/appointments\/([a-f0-9]{64})\/cancel$/))&&req.method==='POST'){
       const b=await body(req);if(!/^\d+$/.test(b.personId||'')||b.confirm!==true)throw Error('Выберите человека и подтвердите отмену записи.');
+      accessTokens.assertPerson(session.accessTokenId,b.personId);
       const accountId=m[1],appointmentId=m[2];
       return await withAccount(accountId,async portal=>{
         const current=await portal.appointments(b.personId),appointment=current.find(a=>a.id===appointmentId);
@@ -137,10 +166,10 @@ const server=http.createServer(async(req,res)=>{
         }catch{return send(409,{error:'Не удалось подтвердить отмену. Обновите список записей перед новой попыткой. Связанные отслеживания поставлены на паузу.'});}
       });
     }
-    if(path==='/api/rules'&&req.method==='GET')return send(200,store.list('rules').filter(r=>r.accountId===accountId).map(r=>({...r,accessPaused:!accessTokens.active(r.accessTokenId),quotaMessage:['active','error','booking','needs_review'].includes(r.status)?accessTokens.ruleIssue(r):''})));
+    if(path==='/api/rules'&&req.method==='GET')return send(200,store.list('rules').filter(ownsRule).map(r=>({...r,accessPaused:!accessTokens.active(r.accessTokenId),quotaMessage:['active','error','booking','needs_review'].includes(r.status)?accessTokens.ruleIssue(r):''})));
     if(path==='/api/rules'&&req.method==='POST'){
-      const b=await body(req);if(b.accountId!==accountId)return send(404,{error:'Аккаунт не найден'});validateRule(b);accessTokens.assertTrackerSlot(session.accessTokenId);if(unresolved(b))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
-      if(store.list('rules').filter(r=>r.accountId===accountId).length>=20)throw Error('Достигнут лимит правил');
+      const b=await body(req);if(!allowedAccount(b.accountId))return send(404,{error:'Аккаунт не найден'});validateRule(b);accessTokens.assertPerson(session.accessTokenId,b.personId);accessTokens.assertTrackerSlot(session.accessTokenId);if(unresolved(b))throw Error('Сначала проверьте результат предыдущей попытки записи в картотеке.');
+      if(store.list('rules').filter(r=>r.accessTokenId===session.accessTokenId).length>=20)throw Error('Достигнут лимит правил');
       return await withAccount(b.accountId,async portal=>{
         const people=await portal.people(),specialties=await portal.specialties(b.personId),doctors=await portal.doctors(b.personId,b.specialtyId);
         const clinic=doctors.find(d=>d.clinic.id===b.clinicId)?.clinic;
@@ -152,7 +181,7 @@ const server=http.createServer(async(req,res)=>{
       });
     }
     if((m=path.match(/^\/api\/rules\/([\w-]+)(?:\/(book|recheck))?$/))){
-      const r=store.get('rules',m[1]);if(!r)return send(404,{error:'Правило не найдено'});
+      const r=store.get('rules',m[1]);if(!r||!ownsRule(r))return send(404,{error:'Правило не найдено'});
       return await withAccount(r.accountId,async portal=>{
         const latest=store.get('rules',r.id);if(!latest)return send(404,{error:'Правило удалено'});
         if(!m[2]&&req.method==='DELETE'){store.delete('rules',r.id);return send(200,{ok:true});}
@@ -197,7 +226,7 @@ const server=http.createServer(async(req,res)=>{
       if(u.protocol!=='https:'||u.port||u.username||u.password||!['fcm.googleapis.com','updates.push.services.mozilla.com','web.push.apple.com'].some(h=>u.hostname===h||u.hostname.endsWith('.'+h))||!s.keys?.p256dh||!s.keys?.auth)throw Error('Неподдерживаемая push-подписка');
       const id=createHash('sha256').update(s.endpoint).digest('hex');store.put('push',id,{id,accountId,accessTokenId:session.accessTokenId,subscription:s});return send(200,{id});
     }
-    if(path==='/api/push/subscription'&&req.method==='DELETE'){const b=await body(req);if(store.get('push',b.id||'')?.accountId===accountId)store.delete('push',b.id);return send(200,{ok:true});}
+    if(path==='/api/push/subscription'&&req.method==='DELETE'){const b=await body(req);if(store.get('push',b.id||'')?.accessTokenId===session.accessTokenId)store.delete('push',b.id);return send(200,{ok:true});}
     if(path==='/api/push/test'&&req.method==='POST'){notify({title:'Portal38',body:'Уведомления работают',tag:'test-'+accountId},accountId,session.accessTokenId);await sendPush();return send(200,{ok:true});}
     send(404,{error:'Маршрут не найден'});
   }catch(e){const message=/[А-Яа-яЁё]/.test(e.message)?e.message:'Не удалось выполнить запрос. Проверьте настройки сервера и доступность портала.';send(400,{error:message});}

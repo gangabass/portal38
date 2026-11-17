@@ -4,10 +4,34 @@ import {conflicts,selectSlots} from './domain.mjs';
 import {load} from 'cheerio';
 import {BookingError,matchesBookedSlot} from './booking-state.mjs';
 export class PortalAccount extends Portal {
+  async findPolicyPerson(data){
+    const people=await this.people();
+    for(const person of people){
+      const $=load(await this.request('/user/person_edit/'+person.id));
+      if(String($('[name="ins-num"]').val()||'').replace(/\s/g,'')!==data.policy)continue;
+      const normalize=s=>String(s||'').trim().toLocaleLowerCase('ru');
+      if(normalize($('[name="surname"]').val())!==normalize(data.lastName)||normalize($('[name="first_name"]').val())!==normalize(data.firstName)||Number($('[name="day"]').val())!==Number(data.birthDate.slice(8))||Number($('[name="month"]').val())!==Number(data.birthDate.slice(5,7))||String($('[name="year"]').val())!==data.birthDate.slice(0,4))throw Error('Данные полиса не совпадают с картотекой. Проверьте введённые данные.');
+      return person;
+    }
+    return null;
+  }
+  async addPerson(data){
+    // Existing matching records also recover a prior submission with an uncertain response.
+    this.peopleCache=null;
+    const existing=await this.findPolicyPerson(data);if(existing)return existing;
+    const $=load(await this.request('/user/person_add')),form=$('form').filter((i,x)=>$(x).find('[name="ins-num"]').length).first();
+    const csrf=form.find('[name="csrf"]').val();
+    if(!csrf||!form.find('[name="surname"]').length||!form.find('[name="first_name"]').length)throw Error('Форма добавления человека изменилась. Обратитесь к администратору.');
+    const body=new URLSearchParams({csrf,surname:data.lastName,first_name:data.firstName,second_name:data.middleName||'',day:String(Number(data.birthDate.slice(8))),month:String(Number(data.birthDate.slice(5,7))),year:data.birthDate.slice(0,4),'territory-id':'0','town-id':'0','street-id':'0',house:'',corpus:'',flat:'',polis_type:'1','ins-num':data.policy,rules_accept:'on','register-submit':'Сохранить'});
+    try{await this.request('/user/person_add',{method:'POST',body});}catch{throw Error('Результат добавления пока неизвестен. Повторите регистрацию: сначала проверим картотеку.');}
+    this.peopleCache=null;
+    const person=await this.findPolicyPerson(data);
+    if(!person)throw Error('Портал не подтвердил добавление человека. Проверьте полис, ФИО и дату рождения.');
+    return person;
+  }
   async cards() {
     let html=await this.request('/user/cards');
     if(!load(html)('a[href*=logout]').length) html=await this.login();
-    if(!parsePeople(html).length)throw Error('В картотеке не найдено людей.');
     return html;
   }
   async people(){if(this.peopleCache&&Date.now()-this.peopleCacheAt<30000)return this.peopleCache;this.peopleCache=parsePeople(await this.cards());this.peopleCacheAt=Date.now();return this.peopleCache;}
