@@ -1,15 +1,5 @@
 const HOST='portal38.is-mis.ru';
 const validName=/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-export function importCookies(input,now=Date.now()){
- if(!Array.isArray(input)||!input.length||input.length>100)throw Error('Не получена сессия портала. Завершите вход через ЕСИА.');
- return input.map(c=>{
-  const domain=String(c.domain||'').replace(/^\./,'').toLowerCase();
-  if(domain!==HOST||!validName.test(c.name)||typeof c.value!=='string'||/[\x00-\x20\x7f;,]/.test(c.value)||c.value.length>8192||typeof c.path!=='string'||!c.path.startsWith('/')||/[\x00-\x20\x7f;]/.test(c.path))throw Error('Некорректные cookies портала.');
-  const expires=Number(c.expirationDate||c.expires||0);
-  if(!Number.isFinite(expires))throw Error('Некорректный срок сессии.');
-  return {name:c.name,value:c.value,domain:HOST,path:c.path,secure:true,expires,hostOnly:c.hostOnly!==false};
- }).filter(c=>!c.expires||c.expires*1000>now);
-}
 export function normalizeCookies(input={}){
  if(Array.isArray(input))return input.map(c=>({...c}));
  return Object.entries(input).map(([name,value])=>({name,value,domain:HOST,path:'/',secure:true,hostOnly:true,expires:0}));
@@ -30,4 +20,3 @@ export function setCookies(jar,headers,url,now=Date.now()){
   if(!expires||expires*1000>now)jar.push({name,value,domain,path,expires,hostOnly:!attrs.domain,secure:Boolean(attrs.secure)});
  }
 }
-export function sessionExpired(){const error=Error('Сессия портала завершилась. В разделе «Подключение» повторите вход через ЕСИА.');error.code='portal_session_expired';return error;}

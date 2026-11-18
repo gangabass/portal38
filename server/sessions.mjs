@@ -1,7 +1,7 @@
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const lifetime=90*86400000;
-export function createSessions(store,verify,accessTokens=null,verifyCookies=null){
+export function createSessions(store,verify,accessTokens=null){
  return {
   async login(login,password,accessTokenId){
    if(accessTokens?.personId(accessTokenId))throw Error('Для входа используйте личный токен.');
@@ -12,18 +12,7 @@ export function createSessions(store,verify,accessTokens=null,verifyCookies=null
    // No account is discovered, created or changed until the portal accepts the credentials.
    if(accessTokens&&!accessTokens.active(accessTokenId))throw Error('Токен доступа приостановлен или удалён.');
    const existing=store.list('accounts').find(a=>a.credentials?.login?.trim()===login);
-   const account={...existing,id:existing?.id||accessTokens?.accountIdForLogin(accessTokenId,login)||randomUUID(),label:existing?.label||'Мой аккаунт',credentials:{login,password},authMethod:'password',authRequired:false,authRevision:randomUUID(),cookies:verified.cookies,...(accessTokenId?{accessTokenIds:[...new Set([...(existing?.accessTokenIds||[]),accessTokenId])]}:{})};
-   return this.finish(account,accessTokenId);
-  },
-  async importPortal(cookies,accessTokenId){
-   if(accessTokens?.personId(accessTokenId))throw Error('Для входа используйте личный токен.');
-   if(!verifyCookies)throw Error('Вход через ЕСИА не настроен.');
-   if(accessTokens&&!accessTokens.active(accessTokenId))throw Error('Токен доступа приостановлен или удалён.');
-   const verified=await verifyCookies(cookies);
-   if(!verified.login||typeof verified.login!=='string')throw Error('Не удалось определить аккаунт портала. Укажите email в профиле portal38 и повторите вход.');
-   const login=verified.login.trim();
-   const existing=store.list('accounts').find(a=>a.credentials?.login?.trim()===login);
-   const account={...existing,id:existing?.id||accessTokens?.accountIdForLogin(accessTokenId,login)||randomUUID(),label:existing?.label||'Мой аккаунт',credentials:{login},authMethod:'esia',authRequired:false,authRevision:randomUUID(),cookies:verified.cookies,accessTokenIds:[...new Set([...(existing?.accessTokenIds||[]),accessTokenId])]};
+   const account={...existing,id:existing?.id||accessTokens?.accountIdForLogin(accessTokenId,login)||randomUUID(),label:existing?.label||'Мой аккаунт',credentials:{login,password},authRevision:randomUUID(),cookies:verified.cookies,...(accessTokenId?{accessTokenIds:[...new Set([...(existing?.accessTokenIds||[]),accessTokenId])]}:{})};
    return this.finish(account,accessTokenId);
   },
   finish(account,accessTokenId){

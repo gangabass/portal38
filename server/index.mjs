@@ -1,8 +1,6 @@
 import {existsSync,readFileSync} from 'node:fs';
 import {createRegistration} from './registration.mjs';
 import http from 'node:http';
-import {load} from 'cheerio';
-import {importCookies} from './cookies.mjs';
 import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import webpush from 'web-push';
 import {Store} from './store.mjs';
@@ -20,19 +18,12 @@ const accessTokens=createAccessTokens(store,env.FAMILY_ACCESS_KEY);
 const origins=(env.ALLOWED_ORIGINS||'').split(',').filter(Boolean),locks=new Map();
 const pushEnabled=Boolean(env.VAPID_PUBLIC_KEY&&env.VAPID_PRIVATE_KEY&&env.VAPID_SUBJECT);
 if(pushEnabled)webpush.setVapidDetails(env.VAPID_SUBJECT,env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY);
-const sessions=createSessions(store,async credentials=>{const portal=new PortalAccount(credentials);await portal.people();return {cookies:portal.cookies};},accessTokens,async input=>{
- const portal=new PortalAccount(null,importCookies(input));
- await portal.people();
- const html=await portal.request('/user/profile'),$=load(html);
- if(!$('a[href*="logout"]').length)throw Error('Вход на портал не подтверждён.');
- const login=$('input[name="email"]').first().val()?.trim();
- return {login,cookies:portal.cookies};
-});
-const accountPublic=a=>({id:a.id,label:a.label,...(a.authMethod?{authMethod:a.authMethod,authRequired:Boolean(a.authRequired)}:{})});
+const sessions=createSessions(store,async credentials=>{const portal=new PortalAccount(credentials);await portal.people();return {cookies:portal.cookies};},accessTokens);
+const accountPublic=a=>({id:a.id,label:a.label});
 const unresolved=r=>store.list('rules').some(other=>other.id!==r.id&&other.accountId===r.accountId&&other.personId===r.personId&&other.specialtyId===r.specialtyId&&['booking','needs_review'].includes(other.status));
 async function withAccount(id,fn){
   const previous=locks.get(id)||Promise.resolve();let release;const gate=new Promise(r=>release=r);const pending=previous.catch(()=>{}).then(()=>gate);locks.set(id,pending);await previous.catch(()=>{});
-  try{const a=store.get('accounts',id);if(!a)throw Error('Аккаунт не найден');const portal=guardBookingAccess(new PortalAccount(a.credentials,a.cookies),accessTokens);portal.authRevision=a.authRevision;try{return await fn(portal,a);}catch(e){if(e.code==='portal_session_expired'){const current=store.get('accounts',id);if(current&&current.authRevision===a.authRevision)store.put('accounts',id,{...current,authRequired:true});}throw e;}finally{const current=store.get('accounts',id);if(current&&current.authRevision===a.authRevision)store.put('accounts',id,{...current,cookies:portal.cookies});}}
+  try{const a=store.get('accounts',id);if(!a)throw Error('Аккаунт не найден');const portal=guardBookingAccess(new PortalAccount(a.credentials,a.cookies),accessTokens);try{return await fn(portal,a);}finally{const current=store.get('accounts',id);if(current&&current.authRevision===a.authRevision)store.put('accounts',id,{...current,cookies:portal.cookies});}}
   finally{release();if(locks.get(id)===pending)locks.delete(id);}
 }
 const credentialsFile=env.PORTAL_ACCOUNT_FILE||'private/portal-account.json';
@@ -43,7 +34,7 @@ if(existsSync(credentialsFile)){
  credentials.login=credentials.login.trim();
  const existing=store.list('accounts').find(a=>a.credentials?.login?.trim()===credentials.login);
  registrationAccountId=existing?.id||randomUUID();
- store.put('accounts',registrationAccountId,{...existing,id:registrationAccountId,label:existing?.label||'Картотека сервиса',credentials,authMethod:'password',authRequired:false,authRevision:existing?.authRevision||randomUUID(),cookies:existing?.cookies||{}});
+ store.put('accounts',registrationAccountId,{...existing,id:registrationAccountId,label:existing?.label||'Картотека сервиса',credentials,authRevision:existing?.authRevision||randomUUID(),cookies:existing?.cookies||{}});
 }
 if(registrationAccountId)store.put('settings','registration-account',{id:'registration-account',accountId:registrationAccountId});
 const registration=createRegistration({store,accessTokens,secret:env.ENCRYPTION_KEY,accountId:registrationAccountId,ensurePerson:(id,data)=>withAccount(id,portal=>{if(!portal.addPerson)throw Error('Добавление в картотеку пока не настроено.');return portal.addPerson(data);})});
@@ -65,14 +56,14 @@ let ticking=false;
 async function tick(){if(ticking)return;ticking=true;
   try{
     const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Irkutsk',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());for(const r of store.list('rules'))if(['active','error'].includes(r.status)&&r.dateTo&&r.dateTo<today)store.put('rules',r.id,{...r,status:'expired',slots:[],message:'Период поиска завершён.'});
-    const pendingGroups=new Map();for(const p of store.list('bookingUsage').filter(p=>p.status==='pending'&&Date.now()-p.at>=120000&&accessTokens.active(p.accessTokenId)&&!store.get('accounts',p.accountId)?.authRequired)){const key=p.accountId+':'+p.personId;const group=pendingGroups.get(key)||{accountId:p.accountId,personId:p.personId,ruleIds:new Set()};group.ruleIds.add(p.ruleId);pendingGroups.set(key,group);}
+    const pendingGroups=new Map();for(const p of store.list('bookingUsage').filter(p=>p.status==='pending'&&Date.now()-p.at>=120000&&accessTokens.active(p.accessTokenId))){const key=p.accountId+':'+p.personId;const group=pendingGroups.get(key)||{accountId:p.accountId,personId:p.personId,ruleIds:new Set()};group.ruleIds.add(p.ruleId);pendingGroups.set(key,group);}
     for(const group of pendingGroups.values())await withAccount(group.accountId,async portal=>{const appointments=await portal.appointments(group.personId);for(const id of group.ruleIds)accessTokens.reconcile({id},appointments);}).catch(()=>{});
-    for(const rule of store.list('rules').filter(r=>['active','error'].includes(r.status)&&!accessTokens.ruleIssue(r)&&!store.get('accounts',r.accountId)?.authRequired)){
+    for(const rule of store.list('rules').filter(r=>['active','error'].includes(r.status)&&!accessTokens.ruleIssue(r))){
     await withAccount(rule.accountId,async portal=>{
       const fresh=store.get('rules',rule.id);if(!fresh||!['active','error'].includes(fresh.status)||accessTokens.ruleIssue(fresh))return;
       if(unresolved(fresh)){store.put('rules',fresh.id,{...fresh,status:'blocked',slots:[],message:'Другая попытка записи не подтверждена. Проверьте картотеку на портале.'});return;}
       try{await runRule(fresh,{portal,previousIds:(fresh.slots||[]).map(s=>s.id),save:r=>store.put('rules',r.id,r),notify:message=>notify(message,fresh.accountId,fresh.accessTokenId)});}
-      catch(error){if(error.code==='portal_session_expired'){const account=store.get('accounts',rule.accountId);if(account&&account.authRevision===portal.authRevision)store.put('accounts',rule.accountId,{...account,authRequired:true});}const current=store.get('rules',rule.id);if(current&&['active','error','booking'].includes(current.status))store.put('rules',rule.id,{...current,status:current.status==='booking'?'needs_review':'error',message:current.status==='booking'?'Проверьте картотеку на портале: результат записи не подтверждён.':error.code==='portal_session_expired'?error.message:'Не удалось проверить портал. Повторим через минуту.',checkedAt:new Date().toISOString()});}
+      catch{const current=store.get('rules',rule.id);if(current&&['active','error','booking'].includes(current.status))store.put('rules',rule.id,{...current,status:current.status==='booking'?'needs_review':'error',message:current.status==='booking'?'Проверьте картотеку на портале: результат записи не подтверждён.':'Не удалось проверить портал. Повторим через минуту.',checkedAt:new Date().toISOString()});}
     }).catch(()=>{});
   }await sendPush();}finally{ticking=false;}}
 for(const r of store.list('rules'))if(r.status==='booking')store.put('rules',r.id,{...r,status:'needs_review',message:'Сервер перезапущен во время записи. Проверьте картотеку на портале.'});
@@ -85,15 +76,14 @@ const server=http.createServer(async(req,res)=>{
   const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Vary':'Origin'};
   const origin=req.headers.origin;
   const send=(status,data)=>{res.writeHead(status,headers);res.end(JSON.stringify(data));};
-  const helperOrigin= /^chrome-extension:\/\/[a-p]{32}$/.test(origin||'')&&req.url==='/api/session/esia';
-  if(origin&&!origins.includes(origin)&&!helperOrigin)return send(403,{error:'Origin не разрешён'});
+  if(origin&&!origins.includes(origin))return send(403,{error:'Origin не разрешён'});
   if(origin)headers['Access-Control-Allow-Origin']=origin;
   if(req.method==='OPTIONS'){headers['Access-Control-Allow-Headers']='Authorization, Content-Type';headers['Access-Control-Allow-Methods']='GET, POST, DELETE, PATCH, OPTIONS';res.writeHead(204,headers);return res.end();}
   const url=new URL(req.url,'http://localhost'),path=url.pathname;
-  if(path==='/api/health'&&req.method==='GET')return send(200,{ok:true,service:'portal38',bookingVerified:false,version:'0.2.0',esia:true});
+  if(path==='/api/health'&&req.method==='GET')return send(200,{ok:true,service:'portal38',bookingVerified:false,version:'0.2.1'});
   const key=(req.headers.authorization||'').replace(/^Bearer /,'');
   const ip=req.socket.remoteAddress,attempt=attempts.get(ip);
-  if((path.startsWith('/api/admin')||(path==='/api/session'||path==='/api/session/esia'||path==='/api/register'||path==='/api/session/token'))&&attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
+  if((path.startsWith('/api/admin')||(path==='/api/session'||path==='/api/register'||path==='/api/session/token'))&&attempt&&attempt.until>Date.now()&&attempt.count>=20)return send(429,{error:'Слишком много попыток. Подождите минуту.'});
   const rejectLogin=()=>{if(attempts.size>1000)attempts.clear();attempts.set(ip,{until:Date.now()+60000,count:attempt&&attempt.until>Date.now()?attempt.count+1:1});};
   if(path==='/api/admin'||path.startsWith('/api/admin/')){
     if(!env.ADMIN_ACCESS_KEY||env.ADMIN_ACCESS_KEY.length<24)return send(503,{error:'Администратор не настроен.'});
@@ -114,11 +104,11 @@ const server=http.createServer(async(req,res)=>{
     try{return send(201,path==='/api/register'?await registration.register(await body(req)):registration.login(key));}
     catch(e){return send(400,{error:/[А-Яа-яЁё]/.test(e.message)?e.message:'Не удалось выполнить регистрацию. Повторите позже.'});}
   }
-  if((path==='/api/session'||path==='/api/session/esia')&&req.method==='POST'){
+  if(path==='/api/session'&&req.method==='POST'){
     const grant=accessTokens.find(key);
     if(!grant){rejectLogin();return send(401,{error:'Неверный токен доступа к сервису'});}
-    try{const b=await body(req);const result=path.endsWith('/esia')?await sessions.importPortal(b.cookies,grant.id):await sessions.login(b.login,b.password,grant.id);attempts.delete(ip);return send(201,result);}
-    catch(e){rejectLogin();return send(401,{error:/^(Этот токен уже привязан|Аккаунт уже привязан|Токен доступа)/.test(e.message)?e.message:path.endsWith('/esia')?'Не удалось подтвердить сессию портала. Завершите вход через ЕСИА; проверьте email в профиле portal38 и повторите передачу сессии.':'Не удалось войти на портал. Проверьте логин и пароль либо повторите позже.'});}
+    try{const b=await body(req);const result=await sessions.login(b.login,b.password,grant.id);attempts.delete(ip);return send(201,result);}
+    catch(e){rejectLogin();return send(401,{error:/^(Этот токен уже привязан|Аккаунт уже привязан|Токен доступа)/.test(e.message)?e.message:'Не удалось войти на портал. Проверьте логин и пароль либо повторите позже.'});}
   }
   const session=sessions.resolve(key);
   if(!session)return send(401,{error:'Войдите с личным логином и паролем портала.'});
